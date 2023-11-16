@@ -3,12 +3,11 @@
 const std = @import("std");
 const stderr = std.io.getStdErr().writer();
 const builtin = @import("builtin");
-const Shader = @import("shaders/Shader.zig");
 
 pub const c = @cImport({
     @cInclude("SDL2/SDL.h");
     @cInclude("epoxy/gl.h");
-    @cInclude("epoxy/glx.h");
+    // @cInclude("epoxy/glx.h");
 });
 
 // helpers =====================================================================
@@ -84,19 +83,21 @@ fn sdl(x: anytype) SdlError!SdlWrapped(@TypeOf(x)) {
 
 // =============================================================================
 
-const ProgramError = error {
+const ShaderError = error {
+    CreateShaderFailed,
+    CompileShaderFailed,
     CreateProgramFailed,
     LinkProgramFailed,
 };
 
-pub const InitError = GlError || SdlError || ProgramError || Shader.InitError;
+pub const InitError = GlError || SdlError || ShaderError;
 
 pub var window: *c.SDL_Window = undefined;
 pub var ctx: c.SDL_GLContext = undefined;
 
 var program: c.GLuint = undefined;
-var vert_shader: Shader = undefined;
-var frag_shader: Shader = undefined;
+var vert_shader: c.GLuint = undefined;
+var frag_shader: c.GLuint = undefined;
 
 const v_position = 0;
 
@@ -126,20 +127,20 @@ pub fn init() InitError!void {
 
     // shader stuff
     program = c.glCreateProgram();
-    if (program == 0) return ProgramError.CreateProgramFailed;
+    if (program == 0) return ShaderError.CreateProgramFailed;
     errdefer c.glDeleteProgram(program);
 
     const vert_source = @embedFile("shaders/tri_vert.glsl");
     const frag_source = @embedFile("shaders/tri_frag.glsl");
 
-    vert_shader = try Shader.init(vert_source, .vert);
-    errdefer vert_shader.deinit();
-    frag_shader = try Shader.init(frag_source, .frag);
-    errdefer frag_shader.deinit();
+    vert_shader = try loadShader(vert_source, .vert);
+    errdefer c.glDeleteShader(vert_shader);
+    frag_shader = try loadShader(frag_source, .frag);
+    errdefer c.glDeleteShader(frag_shader);
 
-    c.glAttachShader(program, vert_shader.handle);
+    c.glAttachShader(program, vert_shader);
     try glCheck();
-    c.glAttachShader(program, frag_shader.handle);
+    c.glAttachShader(program, frag_shader);
     try glCheck();
 
     c.glBindAttribLocation(program, v_position, "v_position");
@@ -157,7 +158,7 @@ pub fn init() InitError!void {
 
         const msg = buf[0..@intCast(len)];
         stderr.print("error linking program: {s}\n", .{msg}) catch {};
-        return ProgramError.LinkProgramFailed;
+        return ShaderError.LinkProgramFailed;
     }
 
     // fixup stuff
@@ -165,12 +166,47 @@ pub fn init() InitError!void {
 }
 
 pub fn deinit() void {
-    frag_shader.deinit();
-    vert_shader.deinit();
+    c.glDeleteShader(frag_shader);
+    c.glDeleteShader(vert_shader);
     c.glDeleteProgram(program);
     c.SDL_GL_DeleteContext(ctx);
     c.SDL_DestroyWindow(window);
     c.SDL_Quit();
+}
+
+const ShaderKind = enum { vert, frag };
+
+fn loadShader(
+    source: [:0]const u8,
+    kind: ShaderKind,
+) (GlError || ShaderError)!c.GLuint {
+    // create shader
+    const shader = c.glCreateShader(switch (kind) {
+        .vert => c.GL_VERTEX_SHADER,
+        .frag => c.GL_FRAGMENT_SHADER,
+    });
+
+    if (shader == 0) return ShaderError.CreateShaderFailed;
+
+    // compile source
+    c.glShaderSource(shader, 1, &source.ptr, null);
+    try glCheck();
+    c.glCompileShader(shader);
+    try glCheck();
+
+    var compiled: c.GLint = undefined;
+    c.glGetShaderiv(shader, c.GL_COMPILE_STATUS, &compiled);
+    if (compiled != c.GL_TRUE) {
+        var buf: [1024]u8 = undefined;
+        var len: c.GLsizei = undefined;
+        c.glGetShaderInfoLog(shader, buf.len, &len, &buf);
+
+        const msg = buf[0..@intCast(len)];
+        stderr.print("error compiling shader: {s}\n", .{msg}) catch {};
+        return ShaderError.CompileShaderFailed;
+    }
+
+    return shader;
 }
 
 /// updates opengl viewport to match window size. call on init and window resize
