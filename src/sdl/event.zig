@@ -38,6 +38,18 @@ pub const Event = union(enum) {
             else => null,
         };
     }
+
+    /// retrieves and converts events through SDL_PollEvent
+    pub fn poll() ?Event {
+        var raw: c.SDL_Event = undefined;
+        while (c.SDL_PollEvent(&raw) != 0) {
+            if (from(raw)) |event| {
+                return event;
+            }
+        }
+
+        return null;
+    }
 };
 
 pub const EventType = enum(c_int) {

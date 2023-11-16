@@ -1,23 +1,14 @@
 const std = @import("std");
 const twodee = @import("twodee");
-const Plugin = twodee.Plugin;
 
-export const plugin = Plugin{
-    .init = &init,
+export const plugin = twodee.Plugin{
     .update = &update,
 };
 
-pub fn init() void {
-}
-
-pub fn update() Plugin.Continue {
-    while (twodee.pollEvent()) |event| {
+fn update(events: []const twodee.Event) void {
+    for (events) |event| {
         switch (event) {
-            .quit => {
-                return .stop;
-            },
-
-            .keyup => |kb| {
+            .keydown => |kb| {
                 std.debug.print(
                     "[{s}] {s}\n",
                     .{ @tagName(event), @tagName(kb.keysym.keycode) },
@@ -27,6 +18,4 @@ pub fn update() Plugin.Continue {
             else => {},
         }
     }
-
-    return .ok;
 }
