@@ -8,7 +8,6 @@ export const plugin = Plugin{
 };
 
 pub fn init() void {
-    std.debug.print("hello, twodee!\n", .{});
 }
 
 pub fn update() Plugin.Continue {

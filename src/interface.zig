@@ -3,14 +3,6 @@
 const lib = @import("lib.zig");
 const c = lib.c;
 
-// graphics ====================================================================
-
-pub fn clear() void {
-    c.glClear(c.GL_COLOR_BUFFER_BIT);
-}
-
-// events ======================================================================
-
 pub usingnamespace @import("sdl/keys.zig");
 pub usingnamespace @import("sdl/event.zig");
 

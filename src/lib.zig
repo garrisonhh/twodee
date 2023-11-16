@@ -3,6 +3,7 @@
 const std = @import("std");
 const stderr = std.io.getStdErr().writer();
 const builtin = @import("builtin");
+const Shader = @import("shaders/Shader.zig");
 
 pub const c = @cImport({
     @cInclude("SDL2/SDL.h");
@@ -12,16 +13,43 @@ pub const c = @cImport({
 
 // helpers =====================================================================
 
-pub const Error = error{SdlError};
+pub const GlError = error {
+    GlInvalidEnum,
+    GlInvalidValue,
+    GlInvalidOperation,
+    GlStackOverflow,
+    GlStackUnderflow,
+    GlOutOfMemory,
+    GlInvalidFramebufferOperation,
+};
 
-fn sdlError() Error {
+pub const SdlError = error{SdlError};
+
+/// checks gl errors
+pub fn glCheck() GlError!void {
+    const err_code = c.glGetError();
+    if (err_code != c.GL_NO_ERROR) {
+        return switch (err_code) {
+            c.GL_INVALID_ENUM => GlError.GlInvalidEnum,
+            c.GL_INVALID_VALUE => GlError.GlInvalidValue,
+            c.GL_INVALID_OPERATION => GlError.GlInvalidOperation,
+            c.GL_STACK_OVERFLOW => GlError.GlStackOverflow,
+            c.GL_STACK_UNDERFLOW => GlError.GlStackUnderflow,
+            c.GL_OUT_OF_MEMORY => GlError.GlOutOfMemory,
+            c.GL_INVALID_FRAMEBUFFER_OPERATION => GlError.GlInvalidFramebufferOperation,
+            else => unreachable,
+        };
+    }
+}
+
+fn sdlError() SdlError {
     if (c.SDL_GetError()) |msg| {
         stderr.print("sdl error: {s}\n", .{msg}) catch {};
     } else {
         stderr.print("sdl error (and GetError failed!)\n", .{}) catch {};
     }
 
-    return Error.SdlError;
+    return SdlError.SdlError;
 }
 
 fn SdlWrapped(comptime T: type) type {
@@ -38,7 +66,7 @@ fn SdlWrapped(comptime T: type) type {
 
 /// wrap sdl function return values. sdl has several error conventions, but they
 /// are all very regular (so metaprogrammable)
-fn sdl(x: anytype) Error!SdlWrapped(@TypeOf(x)) {
+fn sdl(x: anytype) SdlError!SdlWrapped(@TypeOf(x)) {
     const T = @TypeOf(x);
     return switch (T) {
         c_int => if (x != 0) sdlError() else {},
@@ -56,10 +84,24 @@ fn sdl(x: anytype) Error!SdlWrapped(@TypeOf(x)) {
 
 // =============================================================================
 
+const ProgramError = error {
+    CreateProgramFailed,
+    LinkProgramFailed,
+};
+
+pub const InitError = GlError || SdlError || ProgramError || Shader.InitError;
+
 pub var window: *c.SDL_Window = undefined;
 pub var ctx: c.SDL_GLContext = undefined;
 
-pub fn init() Error!void {
+var program: c.GLuint = undefined;
+var vert_shader: Shader = undefined;
+var frag_shader: Shader = undefined;
+
+const v_position = 0;
+
+pub fn init() InitError!void {
+    // sdl2 window
     try sdl(c.SDL_Init(c.SDL_INIT_VIDEO));
 
     window = try sdl(c.SDL_CreateWindow(
@@ -70,18 +112,105 @@ pub fn init() Error!void {
         480,
         c.SDL_WINDOW_OPENGL | c.SDL_WINDOW_SHOWN,
     ));
+    errdefer c.SDL_DestroyWindow(window);
 
+    // opengl context
     try sdl(c.SDL_SetHint(c.SDL_HINT_RENDER_DRIVER, "opengles2"));
     try sdl(c.SDL_GL_SetAttribute(c.SDL_GL_DOUBLEBUFFER, 1));
     try sdl(c.SDL_GL_SetAttribute(c.SDL_GL_DEPTH_SIZE, 32));
 
     ctx = try sdl(c.SDL_GL_CreateContext(window));
+    errdefer c.SDL_GL_DeleteContext(ctx);
 
-    std.debug.print("got epoxy version: {}\n", .{c.epoxy_gl_version()});
+    try sdl(c.SDL_GL_MakeCurrent(window, ctx));
+
+    // shader stuff
+    program = c.glCreateProgram();
+    if (program == 0) return ProgramError.CreateProgramFailed;
+    errdefer c.glDeleteProgram(program);
+
+    const vert_source = @embedFile("shaders/tri_vert.glsl");
+    const frag_source = @embedFile("shaders/tri_frag.glsl");
+
+    vert_shader = try Shader.init(vert_source, .vert);
+    errdefer vert_shader.deinit();
+    frag_shader = try Shader.init(frag_source, .frag);
+    errdefer frag_shader.deinit();
+
+    c.glAttachShader(program, vert_shader.handle);
+    try glCheck();
+    c.glAttachShader(program, frag_shader.handle);
+    try glCheck();
+
+    c.glBindAttribLocation(program, v_position, "v_position");
+    try glCheck();
+
+    c.glLinkProgram(program);
+    try glCheck();
+
+    var linked: c.GLint = undefined;
+    c.glGetProgramiv(program, c.GL_LINK_STATUS, &linked);
+    if (linked != c.GL_TRUE) {
+        var buf: [1024]u8 = undefined;
+        var len: c.GLsizei = undefined;
+        c.glGetProgramInfoLog(program, buf.len, &len, &buf);
+
+        const msg = buf[0..@intCast(len)];
+        stderr.print("error linking program: {s}\n", .{msg}) catch {};
+        return ProgramError.LinkProgramFailed;
+    }
+
+    // fixup stuff
+    try updateViewport();
 }
 
 pub fn deinit() void {
+    frag_shader.deinit();
+    vert_shader.deinit();
+    c.glDeleteProgram(program);
     c.SDL_GL_DeleteContext(ctx);
     c.SDL_DestroyWindow(window);
     c.SDL_Quit();
+}
+
+/// updates opengl viewport to match window size. call on init and window resize
+fn updateViewport() GlError!void {
+    var w: c_int = undefined;
+    var h: c_int = undefined;
+    c.SDL_GetWindowSize(window, &w, &h);
+    c.glViewport(0, 0, w, h);
+    try glCheck();
+}
+
+/// does shader call
+pub fn draw() GlError!void {
+    const triangle = [_]c.GLfloat{
+        0.0, 0.5, 0.0,
+        -0.5, -0.5, 0.0,
+        0.5, -0.5, 0.0,
+    };
+
+    c.glClear(c.GL_COLOR_BUFFER_BIT);
+    try glCheck();
+
+    c.glUseProgram(program);
+    try glCheck();
+
+    c.glVertexAttribPointer(
+        v_position,
+        3,
+        c.GL_FLOAT,
+        c.GL_FALSE,
+        0,
+        &triangle,
+    );
+    try glCheck();
+
+    c.glEnableVertexAttribArray(v_position);
+    try glCheck();
+
+    c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
+    try glCheck();
+
+    c.SDL_GL_SwapWindow(window);
 }

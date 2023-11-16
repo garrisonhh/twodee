@@ -13,7 +13,7 @@ pub const Plugin = extern struct {
     update: *const fn () Continue,
 };
 
-pub const Error = lib.Error || So.Error;
+pub const Error = lib.InitError || So.Error || lib.GlError;
 
 /// loads and runs a plugin once
 pub fn run(path: [:0]const u8) Error!void {
@@ -26,5 +26,7 @@ pub fn run(path: [:0]const u8) Error!void {
     const plug = try so.symbol("plugin", Plugin);
 
     plug.init();
-    while (plug.update() == .ok) {}
+    while (plug.update() == .ok) {
+        try lib.draw();
+    }
 }
